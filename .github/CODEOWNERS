@@ -1,0 +1,13 @@
+# Code owners for report-uri/dbsc-php.
+#
+# This is a security library consumed as a supply-chain dependency. The `master`
+# ruleset requires Code Owner review, so every change to the files below needs an
+# explicit owner approval before merge. The crypto / release surface is called out
+# individually for emphasis even though the global owner already covers it.
+
+*                        @ScottHelme
+
+/src/JwtVerifier.php      @ScottHelme
+/src/DbscServer.php       @ScottHelme
+/composer.json            @ScottHelme
+/.github/                 @ScottHelme
