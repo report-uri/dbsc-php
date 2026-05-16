@@ -22,7 +22,7 @@ jobs:
     steps:
       # Action versions are pinned to major tags and tracked by Dependabot
       # (.github/dependabot.yml), which raises PRs to bump them to exact SHAs.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: shivammathur/setup-php@v2
         with:
           php-version: ${{ matrix.php }}
