@@ -208,8 +208,26 @@ check('refresh rotates the challenge too', $refResp->headers['Secure-Session-Cha
 echo "\nDbscServer — enforcement & attack cases\n";
 $bindingNow = $server->getBinding(ctx($sid));
 check('correct rotated cookie matches', $server->boundCookieMatches($bindingNow, ctx($sid, [], ['__Host-dbsc' => $cookie2])));
-check('stale (pre-refresh) cookie no longer matches', !$server->boundCookieMatches($bindingNow, ctx($sid, [], ['__Host-dbsc' => $cookie1])));
+check('immediately-previous cookie still matches within its lifetime', $server->boundCookieMatches($bindingNow, ctx($sid, [], ['__Host-dbsc' => $cookie1])));
 check('missing cookie does not match', !$server->boundCookieMatches($bindingNow, ctx($sid, [], [])));
+check('an unrelated value never matches', !$server->boundCookieMatches($bindingNow, ctx($sid, [], ['__Host-dbsc' => 'never-issued'])));
+
+// Cookie-rotation overlap: the immediately-previous value is accepted only until the instant
+// it would itself have expired in the browser, and only one level deep.
+$prevLive = new Binding('u', 'sid', $cookie2, 'pem', 'ES256', 'chal', time(), time(), time(), $cookie1, time() + 60);
+$prevDead = new Binding('u', 'sid', $cookie2, 'pem', 'ES256', 'chal', time(), time(), time(), $cookie1, time() - 1);
+check('previous value accepted before previousCookieExpiresAt', $server->boundCookieMatches($prevLive, ctx($sid, [], ['__Host-dbsc' => $cookie1])));
+check('previous value rejected once previousCookieExpiresAt has passed', !$server->boundCookieMatches($prevDead, ctx($sid, [], ['__Host-dbsc' => $cookie1])));
+check('current value still matches even after previous expired', $server->boundCookieMatches($prevDead, ctx($sid, [], ['__Host-dbsc' => $cookie2])));
+
+$chal2 = $server->issueRefreshChallenge(ctx($sid));
+preg_match('/^"([^"]+)"; id="([^"]+)"$/', $chal2->headers['Secure-Session-Challenge'], $cm2);
+$ref2 = $server->refresh($device->refreshJwt($cm2[1]), ctx($sid, ['Sec-Secure-Session-Id' => $cm2[2]]));
+$cookie3 = $ref2->cookies[0]->value;
+$bindingNow2 = $server->getBinding(ctx($sid));
+check('after a second refresh the now-previous (2nd) cookie matches', $server->boundCookieMatches($bindingNow2, ctx($sid, [], ['__Host-dbsc' => $cookie2])));
+check('single-depth: the cookie from two rotations ago no longer matches', !$server->boundCookieMatches($bindingNow2, ctx($sid, [], ['__Host-dbsc' => $cookie1])));
+check('newest rotated cookie matches', $server->boundCookieMatches($bindingNow2, ctx($sid, [], ['__Host-dbsc' => $cookie3])));
 
 $store2 = new InMemoryStore();
 $server2 = new DbscServer(new Config(cookieName: '__Host-dbsc'), $store2);
@@ -273,9 +291,27 @@ check('revoke deletes binding and emits cookie deletion', $server4->getBinding(c
 // stolen-cookie hole DBSC exists to close. Not client-triggerable; the write path always emits
 // valid JSON. This guards against a serializer/version/truncation event.
 
-$validBinding = new Binding('u', 'sid', 'cookie', 'pem', 'ES256', 'chal', 100, 100);
+$validBinding = new Binding('u', 'sid', 'cookie', 'pem', 'ES256', 'chal', 100, 100, 90, 'prevcookie', 390);
 $roundTripped = Binding::fromJson($validBinding->toJson());
-check('Binding round-trips through toJson/fromJson', $roundTripped->cookieValue === 'cookie' && $roundTripped->createdAt === 100);
+check(
+	'Binding round-trips through toJson/fromJson (including the rotation-overlap fields)',
+	$roundTripped->cookieValue === 'cookie'
+	&& $roundTripped->createdAt === 100
+	&& $roundTripped->cookieIssuedAt === 90
+	&& $roundTripped->previousCookieValue === 'prevcookie'
+	&& $roundTripped->previousCookieExpiresAt === 390,
+);
+
+// A record written by an older library version predates the rotation-overlap fields. It must
+// decode WITHOUT throwing (it is fully valid) and default to "no previous-value overlap":
+// strict current-value match only, cookieIssuedAt falling back to createdAt. Graceful and
+// fail-closed — never a lockout, never a fail-open.
+$legacyJson = '{"userId":"u","sessionIdentifier":"s","cookieValue":"c","publicKeyPem":"p","algorithm":"a","challenge":"x","challengeTime":1,"createdAt":7}';
+$legacy = Binding::fromJson($legacyJson);
+check(
+	'legacy (pre-overlap) binding JSON decodes with safe defaults',
+	$legacy->previousCookieValue === '' && $legacy->previousCookieExpiresAt === 0 && $legacy->cookieIssuedAt === 7,
+);
 
 foreach (['not-json', '"a string"', '12', '[]', '{"userId":"u"}', '{"userId":1,"sessionIdentifier":"s","cookieValue":"c","publicKeyPem":"p","algorithm":"a","challenge":"x","challengeTime":1,"createdAt":1}'] as $i => $bad) {
 	try {

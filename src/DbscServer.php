@@ -127,6 +127,7 @@ final class DbscServer
 			$this->nonce(),
 			$now,
 			$now,
+			$now,
 		);
 		$this->store->putBinding($ctx->sessionId, $binding);
 		$this->audit->log(self::EVENT_REGISTERED, 'DBSC session registered.', $ctx->userId);
@@ -221,9 +222,16 @@ final class DbscServer
 			throw new JwtInvalidException('Challenge mismatch');
 		}
 
+		$now = time();
 		$newCookie = $this->nonce(self::COOKIE_VALUE_BYTES);
 		$newChallenge = $this->nonce();
-		$rotated = $binding->withRotatedCookieAndChallenge($newCookie, $newChallenge, time());
+		$rotated = $binding->withRotatedCookieAndChallenge(
+			$newCookie,
+			$newChallenge,
+			$now,
+			$now,
+			$this->config->cookieMaxAgeSeconds,
+		);
 		$this->store->putBinding($ctx->sessionId, $rotated);
 		$this->audit->log(self::EVENT_REFRESHED, 'DBSC cookie refreshed.', $ctx->userId);
 
@@ -292,10 +300,29 @@ final class DbscServer
 	public function boundCookieMatches(Binding $binding, RequestContext $ctx): bool
 	{
 		$presented = $ctx->cookie($this->config->cookieName);
-		if ($binding->cookieValue === '' || !is_string($presented) || $presented === '') {
+		if (!is_string($presented) || $presented === '') {
 			return false;
 		}
-		return hash_equals($binding->cookieValue, $presented);
+		if ($binding->cookieValue !== '' && hash_equals($binding->cookieValue, $presented)) {
+			return true;
+		}
+		// Accept the single immediately-previous cookie value until the instant it would itself
+		// have expired in the browser. The bound cookie rotates on every refresh, but the
+		// refresh round-trip is a propagation window: a request that left the browser just
+		// before it stored the rotated Set-Cookie still legitimately carries the prior value.
+		// Rejecting it as a stolen cookie terminates legitimate sessions whenever a normal
+		// request races a refresh (the failure is latency-proportional, so it bites in
+		// production and not on loopback). The exposure stays bounded — single-depth history,
+		// the value's own natural expiry — and a truly stolen cookie still cannot complete a
+		// refresh without the device-bound key, so it still hard-fails at the next refresh.
+		if (
+			$binding->previousCookieValue !== ''
+			&& time() < $binding->previousCookieExpiresAt
+			&& hash_equals($binding->previousCookieValue, $presented)
+		) {
+			return true;
+		}
+		return false;
 	}
 
 
