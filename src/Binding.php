@@ -3,6 +3,8 @@ declare(strict_types = 1);
 
 namespace ReportUri\Dbsc;
 
+use ReportUri\Dbsc\Exception\CorruptStateException;
+
 /**
  * The established device-bound session record. Its existence in the {@see StoreInterface},
  * keyed by the host application's session id, is the authoritative "this session is hard-DBSC"
@@ -46,14 +48,18 @@ final class Binding
 
 
 	/**
-	 * Returns null if the stored value is malformed — callers treat that as "no binding" so a
-	 * corrupt record fails closed rather than authenticating on garbage.
+	 * Parse a stored binding. Throws on a present-but-unreadable value rather than returning
+	 * null: callers MUST treat that as fail-closed and NOT collapse it to "no binding", which
+	 * would degrade a bound session to plain cookie auth — the fail-open DBSC exists to prevent.
+	 * Absence is represented by the store returning null without ever calling this method.
+	 *
+	 * @throws CorruptStateException
 	 */
-	public static function fromJson(string $json): ?self
+	public static function fromJson(string $json): self
 	{
 		$data = json_decode($json, true);
 		if (!is_array($data)) {
-			return null;
+			throw new CorruptStateException('Binding record is not a JSON object');
 		}
 		$userId = $data['userId'] ?? null;
 		$sessionIdentifier = $data['sessionIdentifier'] ?? null;
@@ -73,7 +79,7 @@ final class Binding
 			!is_int($challengeTime) ||
 			!is_int($createdAt)
 		) {
-			return null;
+			throw new CorruptStateException('Binding record has missing or wrong-typed fields');
 		}
 		return new self(
 			$userId,

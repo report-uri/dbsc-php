@@ -14,6 +14,7 @@ require __DIR__ . '/../src/Exception/JwtInvalidException.php';
 require __DIR__ . '/../src/Exception/ChallengeExpiredException.php';
 require __DIR__ . '/../src/Exception/MissingChallengeException.php';
 require __DIR__ . '/../src/Exception/SessionNotFoundException.php';
+require __DIR__ . '/../src/Exception/CorruptStateException.php';
 require __DIR__ . '/../src/RegistrationResult.php';
 require __DIR__ . '/../src/PendingRegistration.php';
 require __DIR__ . '/../src/Binding.php';
@@ -28,15 +29,19 @@ require __DIR__ . '/../src/AuditLoggerInterface.php';
 require __DIR__ . '/../src/NullAuditLogger.php';
 require __DIR__ . '/../src/DbscServer.php';
 
+use ReportUri\Dbsc\AuditLoggerInterface;
 use ReportUri\Dbsc\Binding;
 use ReportUri\Dbsc\Config;
 use ReportUri\Dbsc\DbscServer;
 use ReportUri\Dbsc\Exception\ChallengeExpiredException;
+use ReportUri\Dbsc\Exception\CorruptStateException;
 use ReportUri\Dbsc\Exception\JwtInvalidException;
 use ReportUri\Dbsc\Exception\SessionNotFoundException;
 use ReportUri\Dbsc\InMemoryStore;
 use ReportUri\Dbsc\JwtVerifier;
+use ReportUri\Dbsc\PendingRegistration;
 use ReportUri\Dbsc\RequestContext;
+use ReportUri\Dbsc\StoreInterface;
 
 $tests = 0;
 $failed = 0;
@@ -260,6 +265,69 @@ $server4->register($dev4->registrationJwt($m4[1]), ctx('session-DDD'));
 check('binding present before revoke', $server4->getBinding(ctx('session-DDD')) instanceof Binding);
 $rev = $server4->revoke(ctx('session-DDD'), true);
 check('revoke deletes binding and emits cookie deletion', $server4->getBinding(ctx('session-DDD')) === null && $rev->cookies[0]->delete === true);
+
+// --- Corrupt state fails closed -----------------------------------------------------------
+// A stored record that is present but unparseable MUST throw CorruptStateException, never
+// decode to null — null is reserved for "no record" (degrade to cookie auth). Returning null
+// for a corrupt binding would silently downgrade a hard-DBSC session and re-open the
+// stolen-cookie hole DBSC exists to close. Not client-triggerable; the write path always emits
+// valid JSON. This guards against a serializer/version/truncation event.
+
+$validBinding = new Binding('u', 'sid', 'cookie', 'pem', 'ES256', 'chal', 100, 100);
+$roundTripped = Binding::fromJson($validBinding->toJson());
+check('Binding round-trips through toJson/fromJson', $roundTripped->cookieValue === 'cookie' && $roundTripped->createdAt === 100);
+
+foreach (['not-json', '"a string"', '12', '[]', '{"userId":"u"}', '{"userId":1,"sessionIdentifier":"s","cookieValue":"c","publicKeyPem":"p","algorithm":"a","challenge":"x","challengeTime":1,"createdAt":1}'] as $i => $bad) {
+	try {
+		Binding::fromJson($bad);
+		check("Binding::fromJson rejects corrupt input #$i", false);
+	} catch (CorruptStateException) {
+		check("Binding::fromJson rejects corrupt input #$i", true);
+	}
+}
+
+$validPending = new PendingRegistration('u', 'chal', 100);
+check('PendingRegistration round-trips', PendingRegistration::fromJson($validPending->toJson())->regChallenge === 'chal');
+try {
+	PendingRegistration::fromJson('{"userId":"u","regChallenge":"c"}'); // regChallengeTime missing
+	check('PendingRegistration::fromJson rejects corrupt input', false);
+} catch (CorruptStateException) {
+	check('PendingRegistration::fromJson rejects corrupt input', true);
+}
+
+/** Store whose binding key is present but unreadable, exercising the fail-closed contract. */
+$corruptStore = new class implements StoreInterface {
+	public function putPendingRegistration(string $sessionId, PendingRegistration $pending): void {}
+	public function getPendingRegistration(string $sessionId): ?PendingRegistration { return null; }
+	public function deletePendingRegistration(string $sessionId): void {}
+	public function putBinding(string $sessionId, Binding $binding): void {}
+	public bool $deleted = false;
+	public function getBinding(string $sessionId): ?Binding { return Binding::fromJson('garbage'); }
+	public function delete(string $sessionId): void { $this->deleted = true; }
+};
+
+$recorder = new class implements AuditLoggerInterface {
+	/** @var list<string> */
+	public array $events = [];
+	public function log(string $event, string $message, ?string $userId): void { $this->events[] = $event; }
+};
+
+$server5 = new DbscServer(new Config(cookieName: '__Host-dbsc'), $corruptStore, audit: $recorder);
+
+try {
+	$server5->getBinding(ctx('session-EEE'));
+	check('gate read of a corrupt binding throws (fails closed, not degrade)', false);
+} catch (CorruptStateException) {
+	check('gate read of a corrupt binding throws (fails closed, not degrade)', true);
+}
+
+$rev5 = $server5->revoke(ctx('session-EEE'), true);
+check(
+	'revoke tears down + audits despite a corrupt binding',
+	$corruptStore->deleted === true
+		&& $rev5->cookies[0]->delete === true
+		&& $recorder->events === [DbscServer::EVENT_ENFORCEMENT_TERMINATED],
+);
 
 echo "\n" . ($failed === 0 ? "OK" : "FAILED") . " — $tests checks, $failed failed\n";
 exit($failed === 0 ? 0 : 1);
