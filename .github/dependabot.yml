@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Keeps GitHub Actions pinned/current; pairs with the SHA-pinning note in ci.yml.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
+  # Dev/test only — the library itself has zero runtime Composer dependencies, so
+  # this mostly tracks tooling if any is added later.
+  - package-ecosystem: composer
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
