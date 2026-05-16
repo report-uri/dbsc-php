@@ -70,9 +70,14 @@ final class FakeDevice
 			'curve_name' => 'prime256v1',
 		]);
 		$d = openssl_pkey_get_details($this->key);
+		// openssl_pkey_get_details() returns the coordinate as a raw bignum with leading zero
+		// bytes stripped, so ~1/256 keys yield a <32-byte x or y. RFC 7518 requires EC JWK
+		// coordinates be the full fixed curve size (left-padded); a spec-compliant client (and
+		// real Chrome) pads them, and the verifier correctly rejects unpadded ones. Pad here so
+		// the fake device behaves like a compliant client and the suite is deterministic.
 		$this->jwk = [
-			'x' => self::b64u($d['ec']['x']),
-			'y' => self::b64u($d['ec']['y']),
+			'x' => self::b64u(self::fixed32($d['ec']['x'])),
+			'y' => self::b64u(self::fixed32($d['ec']['y'])),
 		];
 	}
 
@@ -110,6 +115,15 @@ final class FakeDevice
 		$sLen = ord($der[$o]);
 		$s = ltrim(substr($der, $o + 1, $sLen), "\x00");
 		return str_pad($r, 32, "\x00", STR_PAD_LEFT) . str_pad($s, 32, "\x00", STR_PAD_LEFT);
+	}
+
+
+	/** Left-pad (or trim) a P-256 coordinate to the fixed 32-byte width an RFC 7518 JWK requires. */
+	private static function fixed32(string $coord): string
+	{
+		return strlen($coord) >= 32
+			? substr($coord, -32)
+			: str_pad($coord, 32, "\x00", STR_PAD_LEFT);
 	}
 
 
