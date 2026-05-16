@@ -4,6 +4,7 @@ declare(strict_types = 1);
 namespace ReportUri\Dbsc;
 
 use ReportUri\Dbsc\Exception\ChallengeExpiredException;
+use ReportUri\Dbsc\Exception\CorruptStateException;
 use ReportUri\Dbsc\Exception\JwtInvalidException;
 use ReportUri\Dbsc\Exception\MissingChallengeException;
 use ReportUri\Dbsc\Exception\SessionNotFoundException;
@@ -86,6 +87,7 @@ final class DbscServer
 	 * @throws JwtInvalidException
 	 * @throws ChallengeExpiredException
 	 * @throws MissingChallengeException
+	 * @throws CorruptStateException if a pending-registration record exists but is unreadable
 	 */
 	public function register(string $jwt, RequestContext $ctx): DbscResponse
 	{
@@ -144,6 +146,8 @@ final class DbscServer
 	 * (with the mandatory `id` sf-parameter) plus Sec-Secure-Session-Id. Use this when the
 	 * browser hits /dbsc/refresh with no — or a stale — cached challenge; it caches the new one
 	 * and retries. Returns a bare 403 (no binding ⇒ nothing to refresh) if unbound.
+	 *
+	 * @throws CorruptStateException if the binding record exists but is unreadable
 	 */
 	public function issueRefreshChallenge(RequestContext $ctx): DbscResponse
 	{
@@ -179,6 +183,7 @@ final class DbscServer
 	 * @throws ChallengeExpiredException
 	 * @throws MissingChallengeException
 	 * @throws SessionNotFoundException
+	 * @throws CorruptStateException if the binding record exists but is unreadable
 	 */
 	public function refresh(string $jwt, RequestContext $ctx): DbscResponse
 	{
@@ -240,7 +245,14 @@ final class DbscServer
 	 */
 	public function revoke(RequestContext $ctx, bool $enforcementTerminated = false): DbscResponse
 	{
-		$wasBound = $this->store->getBinding($ctx->sessionId) instanceof Binding;
+		try {
+			$wasBound = $this->store->getBinding($ctx->sessionId) instanceof Binding;
+		} catch (CorruptStateException) {
+			// A corrupt record still represents a session that must be torn down — delete and
+			// audit it; don't let the unreadable value abort revocation (this method is the
+			// fail-closed path callers reach precisely when state is unreadable).
+			$wasBound = true;
+		}
 		$this->store->delete($ctx->sessionId);
 		if ($wasBound) {
 			$this->audit->log(
@@ -261,6 +273,12 @@ final class DbscServer
 	// binding present + cookie missing/mismatched on a document request (or a subresource past
 	// the registration grace), not on the DBSC endpoints ⇒ revoke + log the user out.
 
+	/**
+	 * Null ONLY when the session has no binding (degrade to cookie auth — the recommended
+	 * policy). A present-but-unreadable binding throws instead, so the gate fails closed.
+	 *
+	 * @throws CorruptStateException if the binding record exists but is unreadable
+	 */
 	public function getBinding(RequestContext $ctx): ?Binding
 	{
 		return $this->store->getBinding($ctx->sessionId);
@@ -296,6 +314,8 @@ final class DbscServer
 	/**
 	 * The session-instructions JSON for the current binding, or `{}` if unbound. Echoed on the
 	 * refresh 200 so the browser can confirm it is the same session it registered.
+	 *
+	 * @throws CorruptStateException if the binding record exists but is unreadable
 	 */
 	public function sessionInstructionsJson(RequestContext $ctx): string
 	{

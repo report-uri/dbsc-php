@@ -14,8 +14,11 @@ namespace ReportUri\Dbsc;
  *    dedicated key space — Redis, a table, etc. See README, "Storage".
  *  - Pending registrations should expire on a short TTL (the challenge TTL). Bindings should
  *    expire with the authenticated session lifetime.
- *  - Read failures should fail closed (return null / throw), never silently return a stale or
- *    empty binding that would degrade a bound session to plain cookie auth.
+ *  - getBinding()/getPendingRegistration() MUST return null ONLY when no record exists. A
+ *    record that is present but unparseable MUST throw {@see Exception\CorruptStateException}
+ *    (the bundled value objects' fromJson() already does this — call it only for a record that
+ *    exists). Returning null for corrupt data would degrade a bound session to plain cookie
+ *    auth, the fail-open DBSC exists to prevent.
  */
 interface StoreInterface
 {
