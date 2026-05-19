@@ -217,7 +217,20 @@ final class DbscServer
 			throw $e;
 		}
 
-		if (!hash_equals($binding->challenge, $jti)) {
+		// Accept the current challenge, or the single immediately-previous one until its own TTL.
+		// The browser can legitimately prove the pre-rotation challenge when a request carrying
+		// the value advertiseRefreshChallenge() handed it raced a concurrent issueRefreshChallenge()
+		// rotation. Without this overlap that lands here as a JwtInvalidException — the TERMINAL
+		// revoke-and-logout path, not the benign 403 retry — spuriously logging out a legitimate
+		// session. Constant-time, current first; the device-bound key must still have signed the
+		// JWT either way, so this widens no attack surface (see Binding class docblock).
+		$challengeMatches = hash_equals($binding->challenge, $jti)
+			|| (
+				$binding->previousChallenge !== ''
+				&& time() - $binding->previousChallengeTime <= $this->config->challengeTtlSeconds
+				&& hash_equals($binding->previousChallenge, $jti)
+			);
+		if (!$challengeMatches) {
 			$this->fail(self::EVENT_REFRESH_FAILED, 'Challenge mismatch.', $ctx);
 			throw new JwtInvalidException('Challenge mismatch');
 		}
@@ -335,6 +348,49 @@ final class DbscServer
 	public function isWithinRegistrationGrace(Binding $binding): bool
 	{
 		return time() - $binding->createdAt < $this->config->registrationGraceSeconds;
+	}
+
+
+	/**
+	 * Proactively advertise this session's CURRENT cached challenge as a Secure-Session-Challenge
+	 * header on an ordinary, already-authenticated response, so the browser holds a challenge when
+	 * its first /dbsc/refresh fires and that refresh is single-step instead of the 403-then-proof
+	 * two-step.
+	 *
+	 * No challenge rotation: it re-emits the value the binding already stores (the seed minted by
+	 * {@see register()}) — exactly what the next refresh will be asked to prove. It is delivered
+	 * exactly ONCE: the browser caches the advertised challenge for the session, so on the single
+	 * emission this records `challengeAdvertised` on the binding (one store write, keyed by
+	 * `$ctx->sessionId`, mirroring {@see issueRefreshChallenge()}) and every later call no-ops.
+	 * The caller passes the binding it already read for the enforcement gate, so the no-op path
+	 * costs nothing; only the first delivery touches the store.
+	 *
+	 * Per spec this MUST NOT be attached to the registration response: the Secure-Session-Challenge
+	 * `id` parameter (§9.2.1) must name an EXISTING session, and §8.7 silently drops a challenge
+	 * whose session it cannot identify — and the registration response is the very response that
+	 * creates the session, so the id resolves to nothing there. Call this only where a Binding
+	 * already exists (the enforcement-gate path, which already did {@see getBinding()}); you
+	 * cannot misuse it on registration because you have no Binding to pass.
+	 *
+	 * Returns an empty (no-op) DbscResponse — nothing to apply, nothing written — when there is
+	 * nothing safe or useful to advertise: the seed was already delivered, the session has already
+	 * refreshed (steady state is self-sustaining), or the cached challenge is empty / past its TTL
+	 * (let the reactive 403 path mint a fresh one).
+	 */
+	public function advertiseRefreshChallenge(Binding $binding, RequestContext $ctx): DbscResponse
+	{
+		if (
+			$binding->challengeAdvertised
+			|| $binding->hasRefreshed
+			|| $binding->challenge === ''
+			|| time() - $binding->challengeTime > $this->config->challengeTtlSeconds
+		) {
+			return new DbscResponse();
+		}
+		$this->store->putBinding($ctx->sessionId, $binding->markChallengeAdvertised());
+		return new DbscResponse(
+			headers: $this->challengeHeaders($binding->sessionIdentifier, $binding->challenge),
+		);
 	}
 
 
