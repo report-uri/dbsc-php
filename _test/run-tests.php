@@ -302,6 +302,16 @@ check(
 	&& $roundTripped->previousCookieExpiresAt === 390,
 );
 
+$oneStepBinding = new Binding('u', 'sid', 'cookie', 'pem', 'ES256', 'chal', 100, 100, 90, 'pc', 390, true, 'prevchal', 77, true);
+$oneStepRt = Binding::fromJson($oneStepBinding->toJson());
+check(
+	'Binding round-trips the one-step fields (hasRefreshed / challenge-overlap / challengeAdvertised)',
+	$oneStepRt->hasRefreshed === true
+	&& $oneStepRt->previousChallenge === 'prevchal'
+	&& $oneStepRt->previousChallengeTime === 77
+	&& $oneStepRt->challengeAdvertised === true,
+);
+
 // A record written by an older library version predates the rotation-overlap fields. It must
 // decode WITHOUT throwing (it is fully valid) and default to "no previous-value overlap":
 // strict current-value match only, cookieIssuedAt falling back to createdAt. Graceful and
@@ -311,6 +321,13 @@ $legacy = Binding::fromJson($legacyJson);
 check(
 	'legacy (pre-overlap) binding JSON decodes with safe defaults',
 	$legacy->previousCookieValue === '' && $legacy->previousCookieExpiresAt === 0 && $legacy->cookieIssuedAt === 7,
+);
+check(
+	'legacy binding JSON defaults the one-step fields safely',
+	$legacy->hasRefreshed === false
+	&& $legacy->previousChallenge === ''
+	&& $legacy->previousChallengeTime === 0
+	&& $legacy->challengeAdvertised === false,
 );
 
 foreach (['not-json', '"a string"', '12', '[]', '{"userId":"u"}', '{"userId":1,"sessionIdentifier":"s","cookieValue":"c","publicKeyPem":"p","algorithm":"a","challenge":"x","challengeTime":1,"createdAt":1}'] as $i => $bad) {
@@ -364,6 +381,145 @@ check(
 		&& $rev5->cookies[0]->delete === true
 		&& $recorder->events === [DbscServer::EVENT_ENFORCEMENT_TERMINATED],
 );
+
+echo "\nDbscServer — one-step first-refresh (advertise + challenge-rotation overlap)\n";
+
+// Proactive advertise: hand the browser the seed challenge on an ordinary authenticated
+// response so its first /dbsc/refresh is single-step, delivered exactly once.
+$storeA = new InMemoryStore();
+$serverA = new DbscServer(new Config(cookieName: '__Host-dbsc'), $storeA);
+$devA = new FakeDevice();
+$sidA = 'session-ADV';
+$regA = $serverA->buildRegistrationHeaderResponse(ctx($sidA));
+preg_match('/challenge="([^"]+)"/', $regA->headers['Secure-Session-Registration'], $ma);
+$serverA->register($devA->registrationJwt($ma[1]), ctx($sidA));
+$bindA = $serverA->getBinding(ctx($sidA));
+$seedA = $bindA->challenge;
+
+$adv1 = $serverA->advertiseRefreshChallenge($bindA, ctx($sidA));
+check(
+	'advertise emits the seed challenge with the mandatory id sf-param',
+	($adv1->headers['Secure-Session-Challenge'] ?? '') === sprintf('"%s"; id="%s"', $seedA, $bindA->sessionIdentifier),
+);
+$bindA2 = $serverA->getBinding(ctx($sidA));
+check('advertise does not rotate the challenge', $bindA2->challenge === $seedA && $bindA2->challengeTime === $bindA->challengeTime);
+check('advertise records the one-way delivered mark', $bindA2->challengeAdvertised === true && $bindA2->hasRefreshed === false);
+
+$adv2 = $serverA->advertiseRefreshChallenge($bindA2, ctx($sidA));
+check('advertise is once-only — a second call no-ops', $adv2->headers === [] && $adv2->cookies === []);
+
+$emptyChal = new Binding('u', 'sid', 'c', 'pem', 'ES256', '', time(), time());
+check('advertise no-ops on an empty challenge', $serverA->advertiseRefreshChallenge($emptyChal, ctx('s'))->headers === []);
+$expiredChal = new Binding('u', 'sid', 'c', 'pem', 'ES256', 'seed', time() - 100000, time());
+check('advertise no-ops on an expired challenge', $serverA->advertiseRefreshChallenge($expiredChal, ctx('s'))->headers === []);
+$refreshedB = new Binding('u', 'sid', 'c', 'pem', 'ES256', 'seed', time(), time(), time(), '', 0, true);
+check('advertise no-ops once the session has refreshed', $serverA->advertiseRefreshChallenge($refreshedB, ctx('s'))->headers === []);
+
+// Challenge-rotation race: advertise handed the browser the seed while a concurrent reactive
+// 403 rotated it. The pre-rotation (advertised) value must still refresh — without the overlap
+// this is a JwtInvalidException, the TERMINAL revoke-and-logout path, not a benign 403 retry.
+$storeR = new InMemoryStore();
+$serverR = new DbscServer(new Config(cookieName: '__Host-dbsc'), $storeR);
+$devR = new FakeDevice();
+$sidR = 'session-RACE';
+$regR = $serverR->buildRegistrationHeaderResponse(ctx($sidR));
+preg_match('/challenge="([^"]+)"/', $regR->headers['Secure-Session-Registration'], $mr);
+$serverR->register($devR->registrationJwt($mr[1]), ctx($sidR));
+$seedR = $serverR->getBinding(ctx($sidR))->challenge;
+$serverR->issueRefreshChallenge(ctx($sidR));
+check('reactive 403 retains the pre-rotation challenge as previous', $serverR->getBinding(ctx($sidR))->previousChallenge === $seedR);
+$prevAccepted = false;
+try {
+	$serverR->refresh($devR->refreshJwt($seedR), ctx($sidR));
+	$prevAccepted = true;
+} catch (JwtInvalidException) {
+}
+check('refresh accepts the advertised-then-rotated (previous) challenge', $prevAccepted);
+
+// Single-depth: only the immediately-previous challenge, two rotations ago is gone.
+$storeS = new InMemoryStore();
+$serverS = new DbscServer(new Config(cookieName: '__Host-dbsc'), $storeS);
+$devS = new FakeDevice();
+$sidS = 'session-DEPTH';
+$regS = $serverS->buildRegistrationHeaderResponse(ctx($sidS));
+preg_match('/challenge="([^"]+)"/', $regS->headers['Secure-Session-Registration'], $ms);
+$serverS->register($devS->registrationJwt($ms[1]), ctx($sidS));
+$seedS = $serverS->getBinding(ctx($sidS))->challenge;
+$serverS->issueRefreshChallenge(ctx($sidS));
+$serverS->issueRefreshChallenge(ctx($sidS));
+$r1S = $serverS->getBinding(ctx($sidS))->previousChallenge;
+$twoAgoRejected = false;
+try {
+	$serverS->refresh($devS->refreshJwt($seedS), ctx($sidS));
+} catch (JwtInvalidException) {
+	$twoAgoRejected = true;
+}
+check('single-depth: the challenge from two rotations ago is rejected', $twoAgoRejected);
+$singlePrevOk = false;
+try {
+	$serverS->refresh($devS->refreshJwt($r1S), ctx($sidS));
+	$singlePrevOk = true;
+} catch (JwtInvalidException) {
+}
+check('single-depth: the single immediately-previous challenge is accepted', $singlePrevOk);
+
+// The overlap is bounded by the previous challenge's OWN TTL.
+$storeT = new InMemoryStore();
+$serverT = new DbscServer(new Config(cookieName: '__Host-dbsc'), $storeT);
+$devT = new FakeDevice();
+$sidT = 'session-TTL';
+$regT = $serverT->buildRegistrationHeaderResponse(ctx($sidT));
+preg_match('/challenge="([^"]+)"/', $regT->headers['Secure-Session-Registration'], $mt);
+$serverT->register($devT->registrationJwt($mt[1]), ctx($sidT));
+$seedT = $serverT->getBinding(ctx($sidT))->challenge;
+$serverT->issueRefreshChallenge(ctx($sidT));
+$bT = $serverT->getBinding(ctx($sidT));
+$staleT = new Binding(
+	$bT->userId, $bT->sessionIdentifier, $bT->cookieValue, $bT->publicKeyPem, $bT->algorithm,
+	$bT->challenge, $bT->challengeTime, $bT->createdAt, $bT->cookieIssuedAt,
+	$bT->previousCookieValue, $bT->previousCookieExpiresAt, $bT->hasRefreshed,
+	$bT->previousChallenge, time() - 100000, $bT->challengeAdvertised,
+);
+$storeT->putBinding($sidT, $staleT);
+$expiredPrevRejected = false;
+try {
+	$serverT->refresh($devT->refreshJwt($seedT), ctx($sidT));
+} catch (JwtInvalidException) {
+	$expiredPrevRejected = true;
+}
+check('previous challenge rejected once past its own TTL', $expiredPrevRejected);
+$currentStillOk = false;
+try {
+	$serverT->refresh($devT->refreshJwt($staleT->challenge), ctx($sidT));
+	$currentStillOk = true;
+} catch (JwtInvalidException) {
+}
+check('current challenge still accepted after the previous one expired', $currentStillOk);
+
+// A successful refresh deliberately does NOT retain the just-proved challenge (no success-path
+// propagation window; keeps the spent challenge from being replayable). Asymmetric vs cookies.
+$storeN = new InMemoryStore();
+$serverN = new DbscServer(new Config(cookieName: '__Host-dbsc'), $storeN);
+$devN = new FakeDevice();
+$sidN = 'session-NORETAIN';
+$regN = $serverN->buildRegistrationHeaderResponse(ctx($sidN));
+preg_match('/challenge="([^"]+)"/', $regN->headers['Secure-Session-Registration'], $mn);
+$serverN->register($devN->registrationJwt($mn[1]), ctx($sidN));
+$cN = $serverN->issueRefreshChallenge(ctx($sidN));
+preg_match('/^"([^"]+)"/', $cN->headers['Secure-Session-Challenge'], $cmn);
+$serverN->refresh($devN->refreshJwt($cmn[1]), ctx($sidN));
+$bN = $serverN->getBinding(ctx($sidN));
+check(
+	'successful refresh does not retain the previous challenge',
+	$bN->previousChallenge === '' && $bN->previousChallengeTime === 0 && $bN->hasRefreshed === true,
+);
+$spentRejected = false;
+try {
+	$serverN->refresh($devN->refreshJwt($cmn[1]), ctx($sidN));
+} catch (JwtInvalidException) {
+	$spentRejected = true;
+}
+check('the just-spent challenge is not replayable after a successful refresh', $spentRejected);
 
 echo "\n" . ($failed === 0 ? "OK" : "FAILED") . " — $tests checks, $failed failed\n";
 exit($failed === 0 ? 0 : 1);
