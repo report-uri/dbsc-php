@@ -20,8 +20,10 @@ declare(strict_types = 1);
  */
 
 require __DIR__ . '/../src/Exception/DbscException.php';
+require __DIR__ . '/../src/Exception/RetryableRefreshException.php';
 require __DIR__ . '/../src/Exception/JwtInvalidException.php';
 require __DIR__ . '/../src/Exception/ChallengeExpiredException.php';
+require __DIR__ . '/../src/Exception/ChallengeMismatchException.php';
 require __DIR__ . '/../src/Exception/MissingChallengeException.php';
 require __DIR__ . '/../src/Exception/SessionNotFoundException.php';
 require __DIR__ . '/../src/RegistrationResult.php';
@@ -41,9 +43,8 @@ use ReportUri\Dbsc\Binding;
 use ReportUri\Dbsc\Config;
 use ReportUri\Dbsc\DbscResponse;
 use ReportUri\Dbsc\DbscServer;
-use ReportUri\Dbsc\Exception\ChallengeExpiredException;
 use ReportUri\Dbsc\Exception\DbscException;
-use ReportUri\Dbsc\Exception\MissingChallengeException;
+use ReportUri\Dbsc\Exception\RetryableRefreshException;
 use ReportUri\Dbsc\PendingRegistration;
 use ReportUri\Dbsc\RequestContext;
 use ReportUri\Dbsc\StoreInterface;
@@ -149,8 +150,8 @@ if ($path === '/dbsc/refresh') {
 	}
 	try {
 		emit($dbsc->refresh(trim($jwt, '"'), $ctx)); // phase 2: 200 + rotated cookie
-	} catch (MissingChallengeException | ChallengeExpiredException) {
-		emit($dbsc->issueRefreshChallenge($ctx)); // stale cached challenge — hand out a fresh one
+	} catch (RetryableRefreshException) {
+		emit($dbsc->issueRefreshChallenge($ctx)); // stale/missing/mismatched challenge — hand out a fresh one
 	} catch (DbscException $e) {
 		// Terminal proof failure: revoke + log the user out server-side. Do NOT rely on the
 		// browser/cookie-expiry to do it — that is the stolen-cookie-stays-alive hole.
