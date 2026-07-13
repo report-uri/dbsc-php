@@ -412,7 +412,7 @@ final class DbscServer
 
 	private function instructionsJson(string $sessionIdentifier, RequestContext $ctx): string
 	{
-		return json_encode([
+		$instructions = [
 			'session_identifier' => $sessionIdentifier,
 			'refresh_url' => $this->config->refreshPath,
 			'scope' => [
@@ -429,7 +429,25 @@ final class DbscServer
 					),
 				],
 			],
-		], JSON_THROW_ON_ERROR);
+		];
+
+		$initiators = $this->allowedRefreshInitiators($ctx);
+		if ($initiators !== []) {
+			$instructions['allowed_refresh_initiators'] = $initiators;
+		}
+
+		return json_encode($instructions, JSON_THROW_ON_ERROR);
+	}
+
+
+	/** @return list<string> */
+	private function allowedRefreshInitiators(RequestContext $ctx): array
+	{
+		$initiators = $ctx->allowedRefreshInitiators ?? $this->config->allowedRefreshInitiators;
+		return array_values(array_filter(
+			$initiators,
+			static fn (string $host): bool => trim($host) !== '',
+		));
 	}
 
 

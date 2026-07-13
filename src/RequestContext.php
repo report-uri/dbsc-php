@@ -27,6 +27,8 @@ final class RequestContext
 	/**
 	 * @param array<string, string> $headers request headers (any casing)
 	 * @param array<string, string> $cookies request cookies
+	 * @param list<string>|null $allowedRefreshInitiators per-request override for
+	 *        {@see Config::$allowedRefreshInitiators}; null falls back to the Config value.
 	 */
 	public function __construct(
 		public readonly string $sessionId,
@@ -34,6 +36,7 @@ final class RequestContext
 		public readonly string $originHostUrl,
 		array $headers = [],
 		array $cookies = [],
+		public readonly ?array $allowedRefreshInitiators = null,
 	) {
 		$normalised = [];
 		foreach ($headers as $name => $value) {
