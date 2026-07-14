@@ -85,7 +85,7 @@ try {
 }
 ```
 
-`MissingChallengeException`, `ChallengeExpiredException`, and `ChallengeMismatchException` implement `RetryableRefreshException` — catch it once instead of enumerating three classes. `ChallengeMismatchException` belongs there, not in the terminal set, because `refresh()` only reaches the challenge comparison after the JWT signature has already verified against the device key — a mismatch at that point can only be a benign race (idle session, concurrent refresh, lost 403), never forgery.
+`MissingChallengeException`, `ChallengeExpiredException`, and `ChallengeMismatchException` implement `RetryableRefreshException` — catch it once instead of enumerating three classes. `ChallengeMismatchException` belongs there, not in the terminal set, because `refresh()` only reaches the challenge comparison after the JWT signature has already verified against the device key — a mismatch at that point can only be a benign race (idle session, concurrent refresh, lost 403), never forgery. This is visible via the audit logs too: a `RetryableRefreshException` logs `DbscServer::EVENT_REFRESH_RETRYABLE` (`dbscRefreshRetryable`) .
 
 **Backward compatibility:** all three still `extends DbscException`, so an existing `catch (DbscException) { revoke(...) }` keeps compiling — but it also keeps today's bug (a benign mismatch still force-logs the user out) until you add a `catch (RetryableRefreshException)` ahead of it.
 

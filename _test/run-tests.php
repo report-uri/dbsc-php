@@ -619,7 +619,12 @@ echo "\nDbscServer — benign challenge mismatch does not terminate the session\
 // Repro: idle session past TTL, two concurrent refreshes holding the same stale challenge.
 // Refresh A expires it (benign); refresh B must mismatch benignly too, not revoke.
 $storeU = new InMemoryStore(challengeTtlSeconds: 1000, sessionLifetimeSeconds: 1000);
-$serverU = new DbscServer(new Config(cookieName: '__Host-dbsc', cookieMaxAgeSeconds: 0, challengeTtlSeconds: 1), $storeU);
+$recorderU = new class implements AuditLoggerInterface {
+	/** @var list<string> */
+	public array $events = [];
+	public function log(string $event, string $message, ?string $userId): void { $this->events[] = $event; }
+};
+$serverU = new DbscServer(new Config(cookieName: '__Host-dbsc', cookieMaxAgeSeconds: 0, challengeTtlSeconds: 1), $storeU, audit: $recorderU);
 $devU = new FakeDevice();
 $sidU = 'session-IDLE-RACE';
 $regU = $serverU->buildRegistrationHeaderResponse(ctx($sidU));
@@ -641,6 +646,7 @@ try {
 	$refreshAExpired = true;
 }
 check('refresh A on the idle-past-TTL challenge is benign ChallengeExpiredException', $refreshAExpired);
+check('refresh A audits EVENT_REFRESH_RETRYABLE too', end($recorderU->events) === DbscServer::EVENT_REFRESH_RETRYABLE);
 
 $chalU2 = $serverU->issueRefreshChallenge(ctx($sidU));
 preg_match('/^"([^"]+)"/', $chalU2->headers['Secure-Session-Challenge'], $cmu2);
@@ -664,6 +670,11 @@ check(
 check(
 	'the binding still exists after the benign mismatch (session not revoked)',
 	$serverU->getBinding(ctx($sidU)) instanceof Binding,
+);
+check(
+	'a retryable mismatch audits EVENT_REFRESH_RETRYABLE, not EVENT_REFRESH_FAILED',
+	end($recorderU->events) === DbscServer::EVENT_REFRESH_RETRYABLE
+	&& !in_array(DbscServer::EVENT_REFRESH_FAILED, $recorderU->events, true),
 );
 
 // Forged signature is still terminal, unchanged: a refresh JWT signed by a different key throws

@@ -32,6 +32,7 @@ final class DbscServer
 	public const EVENT_REGISTRATION_FAILED = 'dbscRegistrationFailed';
 	public const EVENT_REFRESHED = 'dbscRefreshed';
 	public const EVENT_REFRESH_FAILED = 'dbscRefreshFailed';
+	public const EVENT_REFRESH_RETRYABLE = 'dbscRefreshRetryable';
 	public const EVENT_REVOKED = 'dbscRevoked';
 	public const EVENT_ENFORCEMENT_TERMINATED = 'dbscEnforcementTerminated';
 
@@ -177,10 +178,11 @@ final class DbscServer
 	 *
 	 * On any {@see Exception\RetryableRefreshException} (i.e. {@see MissingChallengeException},
 	 * {@see ChallengeExpiredException}, {@see ChallengeMismatchException}) the caller should call
-	 * {@see issueRefreshChallenge()} and 403 (benign retry). On any other
-	 * {@see Exception\DbscException} the caller MUST terminate the authenticated session
-	 * server-side — do not rely on the browser or cookie expiry; that is the failure mode that
-	 * leaves a stolen-cookie session alive.
+	 * {@see issueRefreshChallenge()} and 403 (benign retry); the audit log records
+	 * {@see EVENT_REFRESH_RETRYABLE}, not {@see EVENT_REFRESH_FAILED}, so alerting on the latter
+	 * isn't tripped by ordinary concurrency. On any other {@see Exception\DbscException} the
+	 * caller MUST terminate the authenticated session server-side — do not rely on the browser or
+	 * cookie expiry; that is the failure mode that leaves a stolen-cookie session alive.
 	 *
 	 * @throws JwtInvalidException
 	 * @throws ChallengeExpiredException
@@ -204,11 +206,11 @@ final class DbscServer
 		}
 
 		if ($binding->challenge === '') {
-			$this->fail(self::EVENT_REFRESH_FAILED, 'No pending challenge.', $ctx);
+			$this->fail(self::EVENT_REFRESH_RETRYABLE, 'No pending challenge.', $ctx);
 			throw new MissingChallengeException('No pending challenge');
 		}
 		if (time() - $binding->challengeTime > $this->config->challengeTtlSeconds) {
-			$this->fail(self::EVENT_REFRESH_FAILED, 'Challenge expired.', $ctx);
+			$this->fail(self::EVENT_REFRESH_RETRYABLE, 'Challenge expired.', $ctx);
 			throw new ChallengeExpiredException('Challenge expired');
 		}
 
@@ -232,7 +234,7 @@ final class DbscServer
 		if (!$challengeMatches) {
 			// Signature already verified above (device-bound key) — a mismatch here is benign,
 			// never forgery. See ChallengeMismatchException docblock.
-			$this->fail(self::EVENT_REFRESH_FAILED, 'Challenge mismatch.', $ctx);
+			$this->fail(self::EVENT_REFRESH_RETRYABLE, 'Challenge mismatch.', $ctx);
 			throw new ChallengeMismatchException('Challenge mismatch');
 		}
 
