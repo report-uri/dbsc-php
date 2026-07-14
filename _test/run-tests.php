@@ -599,13 +599,13 @@ $storeI4 = new InMemoryStore();
 $serverI4 = new DbscServer(new Config(cookieName: '__Host-dbsc'), $storeI4);
 $devI4 = new FakeDevice();
 $sidI4 = 'session-INIT4';
-$ctxI4 = new RequestContext($sidI4, 'user-1', 'https://example.test', [], [], ['rp.example', '', '   ', 'other.example']);
+$ctxI4 = new RequestContext($sidI4, 'user-1', 'https://example.test', [], [], ['rp.example', '', '   ', ' other.example ']);
 $regI4Hdr = $serverI4->buildRegistrationHeaderResponse($ctxI4);
 preg_match('/challenge="([^"]+)"/', $regI4Hdr->headers['Secure-Session-Registration'], $mi4);
 $regI4 = $serverI4->register($devI4->registrationJwt($mi4[1]), $ctxI4);
 $regI4Decoded = json_decode($regI4->body, true);
 check(
-	'filtering: empty / whitespace-only entries are dropped',
+	'filtering: empty / whitespace-only entries dropped, surviving entries trimmed',
 	($regI4Decoded['allowed_refresh_initiators'] ?? null) === ['rp.example', 'other.example'],
 );
 

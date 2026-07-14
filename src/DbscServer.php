@@ -445,8 +445,8 @@ final class DbscServer
 	{
 		$initiators = $ctx->allowedRefreshInitiators ?? $this->config->allowedRefreshInitiators;
 		return array_values(array_filter(
-			$initiators,
-			static fn (string $host): bool => trim($host) !== '',
+			array_map('trim', $initiators),
+			static fn (string $host): bool => $host !== '',
 		));
 	}
 
