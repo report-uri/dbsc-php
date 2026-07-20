@@ -10,8 +10,10 @@ declare(strict_types = 1);
  */
 
 require __DIR__ . '/../src/Exception/DbscException.php';
+require __DIR__ . '/../src/Exception/RetryableRefreshException.php';
 require __DIR__ . '/../src/Exception/JwtInvalidException.php';
 require __DIR__ . '/../src/Exception/ChallengeExpiredException.php';
+require __DIR__ . '/../src/Exception/ChallengeMismatchException.php';
 require __DIR__ . '/../src/Exception/MissingChallengeException.php';
 require __DIR__ . '/../src/Exception/SessionNotFoundException.php';
 require __DIR__ . '/../src/Exception/CorruptStateException.php';
@@ -34,8 +36,10 @@ use ReportUri\Dbsc\Binding;
 use ReportUri\Dbsc\Config;
 use ReportUri\Dbsc\DbscServer;
 use ReportUri\Dbsc\Exception\ChallengeExpiredException;
+use ReportUri\Dbsc\Exception\ChallengeMismatchException;
 use ReportUri\Dbsc\Exception\CorruptStateException;
 use ReportUri\Dbsc\Exception\JwtInvalidException;
+use ReportUri\Dbsc\Exception\RetryableRefreshException;
 use ReportUri\Dbsc\Exception\SessionNotFoundException;
 use ReportUri\Dbsc\InMemoryStore;
 use ReportUri\Dbsc\JwtVerifier;
@@ -247,10 +251,11 @@ try {
 
 try {
 	$server2->refresh($dev2->refreshJwt('wrong-challenge'), ctx('session-BBB'));
-	check('refresh with a wrong challenge is rejected', false);
-} catch (JwtInvalidException) {
-	check('refresh with a wrong challenge is rejected', true);
+	check('refresh with a wrong challenge is rejected as benign (not terminal)', false);
+} catch (ChallengeMismatchException) {
+	check('refresh with a wrong challenge is rejected as benign (not terminal)', true);
 }
+check('binding survives a benign wrong-challenge refresh (not revoked)', $server2->getBinding(ctx('session-BBB')) instanceof Binding);
 
 try {
 	$server2->refresh($dev2->refreshJwt('x'), ctx('session-UNKNOWN'));
@@ -432,7 +437,7 @@ $prevAccepted = false;
 try {
 	$serverR->refresh($devR->refreshJwt($seedR), ctx($sidR));
 	$prevAccepted = true;
-} catch (JwtInvalidException) {
+} catch (ChallengeMismatchException) {
 }
 check('refresh accepts the advertised-then-rotated (previous) challenge', $prevAccepted);
 
@@ -451,7 +456,7 @@ $r1S = $serverS->getBinding(ctx($sidS))->previousChallenge;
 $twoAgoRejected = false;
 try {
 	$serverS->refresh($devS->refreshJwt($seedS), ctx($sidS));
-} catch (JwtInvalidException) {
+} catch (ChallengeMismatchException) {
 	$twoAgoRejected = true;
 }
 check('single-depth: the challenge from two rotations ago is rejected', $twoAgoRejected);
@@ -459,7 +464,7 @@ $singlePrevOk = false;
 try {
 	$serverS->refresh($devS->refreshJwt($r1S), ctx($sidS));
 	$singlePrevOk = true;
-} catch (JwtInvalidException) {
+} catch (ChallengeMismatchException) {
 }
 check('single-depth: the single immediately-previous challenge is accepted', $singlePrevOk);
 
@@ -484,7 +489,7 @@ $storeT->putBinding($sidT, $staleT);
 $expiredPrevRejected = false;
 try {
 	$serverT->refresh($devT->refreshJwt($seedT), ctx($sidT));
-} catch (JwtInvalidException) {
+} catch (ChallengeMismatchException) {
 	$expiredPrevRejected = true;
 }
 check('previous challenge rejected once past its own TTL', $expiredPrevRejected);
@@ -492,7 +497,7 @@ $currentStillOk = false;
 try {
 	$serverT->refresh($devT->refreshJwt($staleT->challenge), ctx($sidT));
 	$currentStillOk = true;
-} catch (JwtInvalidException) {
+} catch (ChallengeMismatchException) {
 }
 check('current challenge still accepted after the previous one expired', $currentStillOk);
 
@@ -516,7 +521,7 @@ check(
 $spentRejected = false;
 try {
 	$serverN->refresh($devN->refreshJwt($cmn[1]), ctx($sidN));
-} catch (JwtInvalidException) {
+} catch (ChallengeMismatchException) {
 	$spentRejected = true;
 }
 check('the just-spent challenge is not replayable after a successful refresh', $spentRejected);
@@ -607,6 +612,108 @@ $regI4Decoded = json_decode($regI4->body, true);
 check(
 	'filtering: empty / whitespace-only entries dropped, surviving entries trimmed',
 	($regI4Decoded['allowed_refresh_initiators'] ?? null) === ['rp.example', 'other.example'],
+);
+
+echo "\nDbscServer — benign challenge mismatch does not terminate the session\n";
+
+// Repro: idle session past TTL, two concurrent refreshes holding the same stale challenge.
+// Refresh A expires it (benign); refresh B must mismatch benignly too, not revoke.
+$storeU = new InMemoryStore(challengeTtlSeconds: 1000, sessionLifetimeSeconds: 1000);
+$recorderU = new class implements AuditLoggerInterface {
+	/** @var list<string> */
+	public array $events = [];
+	public function log(string $event, string $message, ?string $userId): void { $this->events[] = $event; }
+};
+$serverU = new DbscServer(new Config(cookieName: '__Host-dbsc', cookieMaxAgeSeconds: 0, challengeTtlSeconds: 1), $storeU, audit: $recorderU);
+$devU = new FakeDevice();
+$sidU = 'session-IDLE-RACE';
+$regU = $serverU->buildRegistrationHeaderResponse(ctx($sidU));
+preg_match('/challenge="([^"]+)"/', $regU->headers['Secure-Session-Registration'], $mu);
+$serverU->register($devU->registrationJwt($mu[1]), ctx($sidU));
+
+// Drive one successful refresh so the loop is in steady state.
+$chalU1 = $serverU->issueRefreshChallenge(ctx($sidU));
+preg_match('/^"([^"]+)"/', $chalU1->headers['Secure-Session-Challenge'], $cmu1);
+$serverU->refresh($devU->refreshJwt($cmu1[1]), ctx($sidU));
+$staleChallenge = $serverU->getBinding(ctx($sidU))->challenge;
+
+sleep(2); // advance past challengeTtlSeconds (1s)
+
+$refreshAExpired = false;
+try {
+	$serverU->refresh($devU->refreshJwt($staleChallenge), ctx($sidU));
+} catch (ChallengeExpiredException) {
+	$refreshAExpired = true;
+}
+check('refresh A on the idle-past-TTL challenge is benign ChallengeExpiredException', $refreshAExpired);
+check('refresh A audits EVENT_REFRESH_RETRYABLE too', end($recorderU->events) === DbscServer::EVENT_REFRESH_RETRYABLE);
+
+$chalU2 = $serverU->issueRefreshChallenge(ctx($sidU));
+preg_match('/^"([^"]+)"/', $chalU2->headers['Secure-Session-Challenge'], $cmu2);
+check('reissuing after the benign expiry gives a fresh challenge', $cmu2[1] !== $staleChallenge);
+
+// The demoted previous challenge is already past its own TTL here, so this is a genuine mismatch.
+$refreshBMismatch = null;
+try {
+	$serverU->refresh($devU->refreshJwt($staleChallenge), ctx($sidU));
+} catch (\Throwable $e) {
+	$refreshBMismatch = $e;
+}
+check(
+	'refresh B (same stale challenge, against rotated state) throws ChallengeMismatchException, not JwtInvalidException',
+	$refreshBMismatch instanceof ChallengeMismatchException && !($refreshBMismatch instanceof JwtInvalidException),
+);
+check(
+	'refresh B mismatch is benign / RetryableRefreshException',
+	$refreshBMismatch instanceof RetryableRefreshException,
+);
+check(
+	'the binding still exists after the benign mismatch (session not revoked)',
+	$serverU->getBinding(ctx($sidU)) instanceof Binding,
+);
+check(
+	'a retryable mismatch audits EVENT_REFRESH_RETRYABLE, not EVENT_REFRESH_FAILED',
+	end($recorderU->events) === DbscServer::EVENT_REFRESH_RETRYABLE
+	&& !in_array(DbscServer::EVENT_REFRESH_FAILED, $recorderU->events, true),
+);
+
+// Forged signature is still terminal, unchanged: a refresh JWT signed by a different key throws
+// JwtInvalidException, never the benign ChallengeMismatchException.
+$storeV = new InMemoryStore();
+$serverV = new DbscServer(new Config(cookieName: '__Host-dbsc'), $storeV);
+$devV = new FakeDevice();
+$forgerV = new FakeDevice();
+$sidV = 'session-FORGED';
+$regV = $serverV->buildRegistrationHeaderResponse(ctx($sidV));
+preg_match('/challenge="([^"]+)"/', $regV->headers['Secure-Session-Registration'], $mv);
+$serverV->register($devV->registrationJwt($mv[1]), ctx($sidV));
+$chalV = $serverV->issueRefreshChallenge(ctx($sidV));
+preg_match('/^"([^"]+)"/', $chalV->headers['Secure-Session-Challenge'], $cmv);
+$forgedResult = null;
+try {
+	$serverV->refresh($forgerV->refreshJwt($cmv[1]), ctx($sidV));
+} catch (\Throwable $e) {
+	$forgedResult = $e;
+}
+check(
+	'a forged-signature refresh is still terminal JwtInvalidException, not a RetryableRefreshException',
+	$forgedResult instanceof JwtInvalidException && !($forgedResult instanceof RetryableRefreshException),
+);
+
+// Type/contract: the benign family shares one catchable marker; JwtInvalidException is excluded.
+check(
+	'ChallengeMismatchException is a DbscException and a RetryableRefreshException',
+	new ChallengeMismatchException() instanceof \ReportUri\Dbsc\Exception\DbscException
+	&& new ChallengeMismatchException() instanceof RetryableRefreshException,
+);
+check(
+	'JwtInvalidException is NOT a RetryableRefreshException',
+	!(new JwtInvalidException() instanceof RetryableRefreshException),
+);
+check(
+	'ChallengeExpiredException and MissingChallengeException are RetryableRefreshException too',
+	new ChallengeExpiredException() instanceof RetryableRefreshException
+	&& new \ReportUri\Dbsc\Exception\MissingChallengeException() instanceof RetryableRefreshException,
 );
 
 echo "\n" . ($failed === 0 ? "OK" : "FAILED") . " — $tests checks, $failed failed\n";

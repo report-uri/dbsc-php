@@ -4,6 +4,7 @@ declare(strict_types = 1);
 namespace ReportUri\Dbsc;
 
 use ReportUri\Dbsc\Exception\ChallengeExpiredException;
+use ReportUri\Dbsc\Exception\ChallengeMismatchException;
 use ReportUri\Dbsc\Exception\CorruptStateException;
 use ReportUri\Dbsc\Exception\JwtInvalidException;
 use ReportUri\Dbsc\Exception\MissingChallengeException;
@@ -31,6 +32,7 @@ final class DbscServer
 	public const EVENT_REGISTRATION_FAILED = 'dbscRegistrationFailed';
 	public const EVENT_REFRESHED = 'dbscRefreshed';
 	public const EVENT_REFRESH_FAILED = 'dbscRefreshFailed';
+	public const EVENT_REFRESH_RETRYABLE = 'dbscRefreshRetryable';
 	public const EVENT_REVOKED = 'dbscRevoked';
 	public const EVENT_ENFORCEMENT_TERMINATED = 'dbscEnforcementTerminated';
 
@@ -174,14 +176,17 @@ final class DbscServer
 	 * happened" and terminates, so BOTH the cookie value and challenge must rotate). Returns 200
 	 * with the rotated cookie and the echoed session-instructions JSON.
 	 *
-	 * On {@see MissingChallengeException} / {@see ChallengeExpiredException} the caller should
-	 * call {@see issueRefreshChallenge()} and 403 (benign retry). On any other
-	 * {@see Exception\DbscException} the caller MUST terminate the authenticated session
-	 * server-side — do not rely on the browser or cookie expiry; that is the failure mode that
-	 * leaves a stolen-cookie session alive.
+	 * On any {@see Exception\RetryableRefreshException} (i.e. {@see MissingChallengeException},
+	 * {@see ChallengeExpiredException}, {@see ChallengeMismatchException}) the caller should call
+	 * {@see issueRefreshChallenge()} and 403 (benign retry); the audit log records
+	 * {@see EVENT_REFRESH_RETRYABLE}, not {@see EVENT_REFRESH_FAILED}, so alerting on the latter
+	 * isn't tripped by ordinary concurrency. On any other {@see Exception\DbscException} the
+	 * caller MUST terminate the authenticated session server-side — do not rely on the browser or
+	 * cookie expiry; that is the failure mode that leaves a stolen-cookie session alive.
 	 *
 	 * @throws JwtInvalidException
 	 * @throws ChallengeExpiredException
+	 * @throws ChallengeMismatchException
 	 * @throws MissingChallengeException
 	 * @throws SessionNotFoundException
 	 * @throws CorruptStateException if the binding record exists but is unreadable
@@ -201,11 +206,11 @@ final class DbscServer
 		}
 
 		if ($binding->challenge === '') {
-			$this->fail(self::EVENT_REFRESH_FAILED, 'No pending challenge.', $ctx);
+			$this->fail(self::EVENT_REFRESH_RETRYABLE, 'No pending challenge.', $ctx);
 			throw new MissingChallengeException('No pending challenge');
 		}
 		if (time() - $binding->challengeTime > $this->config->challengeTtlSeconds) {
-			$this->fail(self::EVENT_REFRESH_FAILED, 'Challenge expired.', $ctx);
+			$this->fail(self::EVENT_REFRESH_RETRYABLE, 'Challenge expired.', $ctx);
 			throw new ChallengeExpiredException('Challenge expired');
 		}
 
@@ -217,13 +222,9 @@ final class DbscServer
 			throw $e;
 		}
 
-		// Accept the current challenge, or the single immediately-previous one until its own TTL.
-		// The browser can legitimately prove the pre-rotation challenge when a request carrying
-		// the value advertiseRefreshChallenge() handed it raced a concurrent issueRefreshChallenge()
-		// rotation. Without this overlap that lands here as a JwtInvalidException — the TERMINAL
-		// revoke-and-logout path, not the benign 403 retry — spuriously logging out a legitimate
-		// session. Constant-time, current first; the device-bound key must still have signed the
-		// JWT either way, so this widens no attack surface (see Binding class docblock).
+		// Accept the current challenge, or the single immediately-previous one until its own TTL
+		// (bridges a concurrent issueRefreshChallenge() rotation; see Binding class docblock).
+		// Constant-time, current first.
 		$challengeMatches = hash_equals($binding->challenge, $jti)
 			|| (
 				$binding->previousChallenge !== ''
@@ -231,8 +232,10 @@ final class DbscServer
 				&& hash_equals($binding->previousChallenge, $jti)
 			);
 		if (!$challengeMatches) {
-			$this->fail(self::EVENT_REFRESH_FAILED, 'Challenge mismatch.', $ctx);
-			throw new JwtInvalidException('Challenge mismatch');
+			// Signature already verified above (device-bound key) — a mismatch here is benign,
+			// never forgery. See ChallengeMismatchException docblock.
+			$this->fail(self::EVENT_REFRESH_RETRYABLE, 'Challenge mismatch.', $ctx);
+			throw new ChallengeMismatchException('Challenge mismatch');
 		}
 
 		$now = time();

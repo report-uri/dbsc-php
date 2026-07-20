@@ -73,6 +73,22 @@ if ($mustCheck && !$dbsc->boundCookieMatches($binding, $ctx)) {
 
 Enforce on document loads **and** on subresources past the registration grace — *not* document-only, which would let a stolen cookie exfiltrate via XHR within the cookie lifetime. Skip the gate on the `/dbsc/*` endpoints themselves.
 
+### `refresh()` failure contract
+
+```php
+try {
+    emit($dbsc->refresh($jwt, $ctx));
+} catch (RetryableRefreshException) {
+    emit($dbsc->issueRefreshChallenge($ctx)); // benign: 403, browser retries
+} catch (DbscException $e) {
+    emit($dbsc->revoke($ctx, enforcementTerminated: true)); // terminal: stolen-cookie signal
+}
+```
+
+`MissingChallengeException`, `ChallengeExpiredException`, and `ChallengeMismatchException` implement `RetryableRefreshException` — catch it once instead of enumerating three classes. `ChallengeMismatchException` belongs there, not in the terminal set, because `refresh()` only reaches the challenge comparison after the JWT signature has already verified against the device key — a mismatch at that point can only be a benign race (idle session, concurrent refresh, lost 403), never forgery. This is visible via the audit logs too: a `RetryableRefreshException` logs `DbscServer::EVENT_REFRESH_RETRYABLE` (`dbscRefreshRetryable`) .
+
+**Backward compatibility:** all three still `extends DbscException`, so an existing `catch (DbscException) { revoke(...) }` keeps compiling — but it also keeps today's bug (a benign mismatch still force-logs the user out) until you add a `catch (RetryableRefreshException)` ahead of it.
+
 ## Storage
 
 Key DBSC state by your **stable session id**, in a **dedicated key space** — never in a read-modify-written shared session blob.
@@ -100,7 +116,7 @@ Baked into this library from integration testing against real Chrome — change 
 php _test/run-tests.php
 ```
 
-A self-contained harness (no PHPUnit): it generates a real EC P-256 device key, builds the JWTs exactly as Chrome does, and drives the full register/refresh/enforce/revoke flow plus the attack cases (wrong device key, wrong/expired challenge, stale cookie, `alg=none`).
+A self-contained harness (no PHPUnit): it generates a real EC P-256 device key, builds the JWTs exactly as Chrome does, and drives the full register/refresh/enforce/revoke flow plus the attack cases (wrong device key, wrong/expired/mismatched challenge, stale cookie, `alg=none`).
 
 ## License
 
