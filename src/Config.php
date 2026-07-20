@@ -31,6 +31,13 @@ final class Config
 		 */
 		public readonly int $registrationGraceSeconds = 5,
 		public readonly string $cookieSameSite = 'Lax',
+		/**
+		 * Hosts allowed to initiate a cross-site DBSC refresh (allowed_refresh_initiators).
+		 * Overridable per request via {@see RequestContext::$allowedRefreshInitiators}.
+		 *
+		 * @var list<string>
+		 */
+		public readonly array $allowedRefreshInitiators = [],
 	) {
 		if ($challengeTtlSeconds <= $cookieMaxAgeSeconds) {
 			throw new \InvalidArgumentException(

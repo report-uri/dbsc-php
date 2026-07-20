@@ -92,6 +92,7 @@ Baked into this library from integration testing against real Chrome — change 
 - **`Secure-Session-Challenge` must carry the `id` sf-parameter** naming the session.
 - **`challengeTtl` must exceed `cookieMaxAge`** (the `Config` constructor enforces this) so a challenge the browser cached just before cookie expiry is still valid when it is used.
 - **The bound cookie uses `__Host-`**, so `include_site` is `false` (no subdomain span).
+- **`allowed_refresh_initiators`** ([spec](https://w3c.github.io/webappsec-dbsc/#allowed-refresh-initiators)) lists out-of-scope hosts allowed to trigger a refresh on a cross-site-initiated navigation — by default Chrome refuses (a timing side-channel mitigation). Omitted when empty (the spec default). Set a static default via `Config(allowedRefreshInitiators: [...])`, or override per request via `RequestContext(..., allowedRefreshInitiators: [...])` (`null` falls back to `Config`, `[]` forces the key off). Entries pass through verbatim, wildcards included. **Security note:** each listed host regains the authentication-state timing oracle this mitigation removes — list only relying parties you trust.
 
 ## Tests
 

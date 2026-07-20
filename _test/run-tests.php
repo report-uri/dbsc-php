@@ -521,5 +521,93 @@ try {
 }
 check('the just-spent challenge is not replayable after a successful refresh', $spentRejected);
 
+echo "\nDbscServer — allowed_refresh_initiators\n";
+
+// Default: no Config value, no per-request override -> key absent, byte-identical to prior output.
+$storeI1 = new InMemoryStore();
+$serverI1 = new DbscServer(new Config(cookieName: '__Host-dbsc'), $storeI1);
+$devI1 = new FakeDevice();
+$sidI1 = 'session-INIT1';
+$regI1Hdr = $serverI1->buildRegistrationHeaderResponse(ctx($sidI1));
+preg_match('/challenge="([^"]+)"/', $regI1Hdr->headers['Secure-Session-Registration'], $mi1);
+$regI1 = $serverI1->register($devI1->registrationJwt($mi1[1]), ctx($sidI1));
+check('default: register body omits allowed_refresh_initiators', !str_contains($regI1->body, 'allowed_refresh_initiators'));
+$cI1 = $serverI1->issueRefreshChallenge(ctx($sidI1));
+preg_match('/^"([^"]+)"; id="([^"]+)"$/', $cI1->headers['Secure-Session-Challenge'], $cmi1);
+$refI1 = $serverI1->refresh($devI1->refreshJwt($cmi1[1]), ctx($sidI1, ['Sec-Secure-Session-Id' => $cmi1[2]]));
+check('default: refresh body omits allowed_refresh_initiators', !str_contains($refI1->body, 'allowed_refresh_initiators'));
+
+// Static config: Config-level list appears in register, refresh, and sessionInstructionsJson.
+$storeI2 = new InMemoryStore();
+$serverI2 = new DbscServer(
+	new Config(cookieName: '__Host-dbsc', allowedRefreshInitiators: ['example.com', '*.example.com']),
+	$storeI2,
+);
+$devI2 = new FakeDevice();
+$sidI2 = 'session-INIT2';
+$regI2Hdr = $serverI2->buildRegistrationHeaderResponse(ctx($sidI2));
+preg_match('/challenge="([^"]+)"/', $regI2Hdr->headers['Secure-Session-Registration'], $mi2);
+$regI2 = $serverI2->register($devI2->registrationJwt($mi2[1]), ctx($sidI2));
+$regI2Decoded = json_decode($regI2->body, true);
+check(
+	'static config: register body carries the configured initiators, order preserved',
+	($regI2Decoded['allowed_refresh_initiators'] ?? null) === ['example.com', '*.example.com'],
+);
+$cI2 = $serverI2->issueRefreshChallenge(ctx($sidI2));
+preg_match('/^"([^"]+)"; id="([^"]+)"$/', $cI2->headers['Secure-Session-Challenge'], $cmi2);
+$refI2 = $serverI2->refresh($devI2->refreshJwt($cmi2[1]), ctx($sidI2, ['Sec-Secure-Session-Id' => $cmi2[2]]));
+$refI2Decoded = json_decode($refI2->body, true);
+check(
+	'static config: refresh body carries the configured initiators',
+	($refI2Decoded['allowed_refresh_initiators'] ?? null) === ['example.com', '*.example.com'],
+);
+$sessionJsonI2 = json_decode($serverI2->sessionInstructionsJson(ctx($sidI2)), true);
+check(
+	'static config: sessionInstructionsJson carries the configured initiators',
+	($sessionJsonI2['allowed_refresh_initiators'] ?? null) === ['example.com', '*.example.com'],
+);
+
+// Per-request override: RequestContext value wins over a different Config default.
+$storeI3 = new InMemoryStore();
+$serverI3 = new DbscServer(
+	new Config(cookieName: '__Host-dbsc', allowedRefreshInitiators: ['configured.example']),
+	$storeI3,
+);
+$devI3 = new FakeDevice();
+$sidI3 = 'session-INIT3';
+$ctxI3Override = new RequestContext($sidI3, 'user-1', 'https://example.test', [], [], ['rp.example']);
+$regI3Hdr = $serverI3->buildRegistrationHeaderResponse($ctxI3Override);
+preg_match('/challenge="([^"]+)"/', $regI3Hdr->headers['Secure-Session-Registration'], $mi3);
+$regI3 = $serverI3->register($devI3->registrationJwt($mi3[1]), $ctxI3Override);
+$regI3Decoded = json_decode($regI3->body, true);
+check(
+	'per-request override: RequestContext initiators win over the Config default',
+	($regI3Decoded['allowed_refresh_initiators'] ?? null) === ['rp.example'],
+);
+
+// Explicit empty override: RequestContext([]) resolves to empty -> key omitted, even though
+// Config has a non-empty default.
+$ctxI3Empty = new RequestContext($sidI3, 'user-1', 'https://example.test', [], [], []);
+$sessionJsonI3Empty = $serverI3->sessionInstructionsJson($ctxI3Empty);
+check(
+	'explicit empty override: key omitted despite a non-empty Config default',
+	!str_contains($sessionJsonI3Empty, 'allowed_refresh_initiators'),
+);
+
+// Filtering: empty / whitespace-only entries are dropped.
+$storeI4 = new InMemoryStore();
+$serverI4 = new DbscServer(new Config(cookieName: '__Host-dbsc'), $storeI4);
+$devI4 = new FakeDevice();
+$sidI4 = 'session-INIT4';
+$ctxI4 = new RequestContext($sidI4, 'user-1', 'https://example.test', [], [], ['rp.example', '', '   ', ' other.example ']);
+$regI4Hdr = $serverI4->buildRegistrationHeaderResponse($ctxI4);
+preg_match('/challenge="([^"]+)"/', $regI4Hdr->headers['Secure-Session-Registration'], $mi4);
+$regI4 = $serverI4->register($devI4->registrationJwt($mi4[1]), $ctxI4);
+$regI4Decoded = json_decode($regI4->body, true);
+check(
+	'filtering: empty / whitespace-only entries dropped, surviving entries trimmed',
+	($regI4Decoded['allowed_refresh_initiators'] ?? null) === ['rp.example', 'other.example'],
+);
+
 echo "\n" . ($failed === 0 ? "OK" : "FAILED") . " — $tests checks, $failed failed\n";
 exit($failed === 0 ? 0 : 1);
