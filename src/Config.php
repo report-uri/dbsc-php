@@ -38,6 +38,19 @@ final class Config
 		 * @var list<string>
 		 */
 		public readonly array $allowedRefreshInitiators = [],
+		/**
+		 * Modifications to the default scope (scope_specification), overridable per request via
+		 * {@see RequestContext::$scopeSpecification}. Omitted from the wire entirely when empty,
+		 * which is the spec default of "the whole origin".
+		 *
+		 * Almost every deployment wants at least one exclude rule here. Scope decides which requests
+		 * the browser DEFERS to refresh an expired cookie, and each refresh costs a signature from a
+		 * rate-limited device key — so anything that needs no session (assets, health checks, status
+		 * polling) should be excluded. See {@see ScopeRule} for what happens when it is not.
+		 *
+		 * @var list<ScopeRule>
+		 */
+		public readonly array $scopeSpecification = [],
 	) {
 		if ($challengeTtlSeconds <= $cookieMaxAgeSeconds) {
 			throw new \InvalidArgumentException(

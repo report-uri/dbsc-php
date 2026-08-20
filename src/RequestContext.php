@@ -29,6 +29,9 @@ final class RequestContext
 	 * @param array<string, string> $cookies request cookies
 	 * @param list<string>|null $allowedRefreshInitiators per-request override for
 	 *        {@see Config::$allowedRefreshInitiators}; null falls back to the Config value.
+	 * @param list<ScopeRule>|null $scopeSpecification per-request override for
+	 *        {@see Config::$scopeSpecification}; null falls back to the Config value, [] forces the
+	 *        key off.
 	 */
 	public function __construct(
 		public readonly string $sessionId,
@@ -37,6 +40,7 @@ final class RequestContext
 		array $headers = [],
 		array $cookies = [],
 		public readonly ?array $allowedRefreshInitiators = null,
+		public readonly ?array $scopeSpecification = null,
 	) {
 		$normalised = [];
 		foreach ($headers as $name => $value) {

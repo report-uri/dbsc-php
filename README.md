@@ -108,6 +108,28 @@ Baked into this library from integration testing against real Chrome — change 
 - **`Secure-Session-Challenge` must carry the `id` sf-parameter** naming the session.
 - **`challengeTtl` must exceed `cookieMaxAge`** (the `Config` constructor enforces this) so a challenge the browser cached just before cookie expiry is still valid when it is used.
 - **The bound cookie uses `__Host-`**, so `include_site` is `false` (no subdomain span).
+- **Scope the session to what it protects, not to the whole origin.** This is the default that
+  costs you, and it is not obvious. Scope decides which requests the browser DEFERS while it
+  refreshes an expired bound cookie, and every refresh spends a signature from a rate-limited device
+  key. With the default whole-origin scope, your static assets are in it — so a cold page load with
+  an expired cookie fires every stylesheet, script and icon at once and the browser attempts a
+  **separate refresh for each**; it does not coalesce them. Measured against Chrome 151: seven
+  assets, seven signing attempts in the same second, `quota_exceeded`, and a wedged session. Once
+  the quota is gone refreshes stop, the browser will not register a replacement for a scope it
+  already covers, and the site becomes indistinguishable from one with no DBSC support at all —
+  only clearing site data recovers it. Exclude anything that needs no session:
+
+  ```php
+  new Config(scopeSpecification: [
+      ScopeRule::exclude(path: '/assets/'),
+      ScopeRule::exclude(path: '/healthz'),
+  ]);
+  ```
+
+  Omitted from the wire entirely when empty (the spec default). Overridable per request via
+  `RequestContext(..., scopeSpecification: [...])`, where `null` inherits the `Config` value and
+  `[]` forces the key off. `path` is a **prefix**, not an exact match.
+
 - **`allowed_refresh_initiators`** ([spec](https://w3c.github.io/webappsec-dbsc/#allowed-refresh-initiators)) lists out-of-scope hosts allowed to trigger a refresh on a cross-site-initiated navigation — by default Chrome refuses (a timing side-channel mitigation). Omitted when empty (the spec default). Set a static default via `Config(allowedRefreshInitiators: [...])`, or override per request via `RequestContext(..., allowedRefreshInitiators: [...])` (`null` falls back to `Config`, `[]` forces the key off). Entries pass through verbatim, wildcards included. **Security note:** each listed host regains the authentication-state timing oracle this mitigation removes — list only relying parties you trust.
 
 ## Tests

@@ -434,12 +434,27 @@ final class DbscServer
 			],
 		];
 
+		$scopeRules = $this->scopeSpecification($ctx);
+		if ($scopeRules !== []) {
+			$instructions['scope']['scope_specification'] = array_map(
+				static fn (ScopeRule $rule): array => $rule->toArray(),
+				$scopeRules,
+			);
+		}
+
 		$initiators = $this->allowedRefreshInitiators($ctx);
 		if ($initiators !== []) {
 			$instructions['allowed_refresh_initiators'] = $initiators;
 		}
 
 		return json_encode($instructions, JSON_THROW_ON_ERROR);
+	}
+
+
+	/** @return list<ScopeRule> */
+	private function scopeSpecification(RequestContext $ctx): array
+	{
+		return array_values($ctx->scopeSpecification ?? $this->config->scopeSpecification);
 	}
 
 

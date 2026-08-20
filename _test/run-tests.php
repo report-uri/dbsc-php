@@ -23,6 +23,7 @@ require __DIR__ . '/../src/Binding.php';
 require __DIR__ . '/../src/StoreInterface.php';
 require __DIR__ . '/../src/InMemoryStore.php';
 require __DIR__ . '/../src/JwtVerifier.php';
+require __DIR__ . '/../src/ScopeRule.php';
 require __DIR__ . '/../src/Config.php';
 require __DIR__ . '/../src/RequestContext.php';
 require __DIR__ . '/../src/Cookie.php';
@@ -45,6 +46,7 @@ use ReportUri\Dbsc\InMemoryStore;
 use ReportUri\Dbsc\JwtVerifier;
 use ReportUri\Dbsc\PendingRegistration;
 use ReportUri\Dbsc\RequestContext;
+use ReportUri\Dbsc\ScopeRule;
 use ReportUri\Dbsc\StoreInterface;
 
 $tests = 0;
@@ -715,6 +717,118 @@ check(
 	new ChallengeExpiredException() instanceof RetryableRefreshException
 	&& new \ReportUri\Dbsc\Exception\MissingChallengeException() instanceof RetryableRefreshException,
 );
+
+echo "\nDbscServer — scope_specification\n";
+
+// Default: no rules -> the key is absent entirely, which is the spec default of "the whole origin".
+$storeS1 = new InMemoryStore();
+$serverS1 = new DbscServer(new Config(cookieName: '__Host-dbsc'), $storeS1);
+$devS1 = new FakeDevice();
+$sidS1 = 'session-SCOPE1';
+$regS1Hdr = $serverS1->buildRegistrationHeaderResponse(ctx($sidS1));
+preg_match('/challenge="([^"]+)"/', $regS1Hdr->headers['Secure-Session-Registration'], $ms1);
+$regS1 = $serverS1->register($devS1->registrationJwt($ms1[1]), ctx($sidS1));
+check('default: register body omits scope_specification', !str_contains($regS1->body, 'scope_specification'));
+$cS1 = $serverS1->issueRefreshChallenge(ctx($sidS1));
+preg_match('/^"([^"]+)"; id="([^"]+)"$/', $cS1->headers['Secure-Session-Challenge'], $cms1);
+$refS1 = $serverS1->refresh($devS1->refreshJwt($cms1[1]), ctx($sidS1, ['Sec-Secure-Session-Id' => $cms1[2]]));
+check('default: refresh body omits scope_specification', !str_contains($refS1->body, 'scope_specification'));
+
+// Static config: rules ride on register, refresh and sessionInstructionsJson alike. A browser that
+// missed the registration response must still learn the scope from the next refresh.
+$storeS2 = new InMemoryStore();
+$serverS2 = new DbscServer(
+	new Config(cookieName: '__Host-dbsc', scopeSpecification: [
+		ScopeRule::exclude(path: '/assets/'),
+		ScopeRule::include(path: '/only_this', domain: 'trusted.example.com'),
+	]),
+	$storeS2,
+);
+$devS2 = new FakeDevice();
+$sidS2 = 'session-SCOPE2';
+$regS2Hdr = $serverS2->buildRegistrationHeaderResponse(ctx($sidS2));
+preg_match('/challenge="([^"]+)"/', $regS2Hdr->headers['Secure-Session-Registration'], $ms2);
+$regS2 = $serverS2->register($devS2->registrationJwt($ms2[1]), ctx($sidS2));
+$regS2Decoded = json_decode($regS2->body, true);
+check(
+	'static config: rules sit INSIDE scope, not beside it',
+	($regS2Decoded['scope']['scope_specification'][0] ?? null) === ['type' => 'exclude', 'path' => '/assets/'],
+);
+check(
+	'static config: an absent domain is omitted, not sent as null',
+	!array_key_exists('domain', $regS2Decoded['scope']['scope_specification'][0] ?? []),
+);
+check(
+	'static config: include rules carry both domain and path, order preserved',
+	($regS2Decoded['scope']['scope_specification'][1] ?? null)
+		=== ['type' => 'include', 'domain' => 'trusted.example.com', 'path' => '/only_this'],
+);
+$cS2 = $serverS2->issueRefreshChallenge(ctx($sidS2));
+preg_match('/^"([^"]+)"; id="([^"]+)"$/', $cS2->headers['Secure-Session-Challenge'], $cms2);
+$refS2 = $serverS2->refresh($devS2->refreshJwt($cms2[1]), ctx($sidS2, ['Sec-Secure-Session-Id' => $cms2[2]]));
+$refS2Decoded = json_decode($refS2->body, true);
+check(
+	'static config: refresh body carries the same rules',
+	($refS2Decoded['scope']['scope_specification'][0]['path'] ?? null) === '/assets/',
+);
+$sessionJsonS2 = json_decode($serverS2->sessionInstructionsJson(ctx($sidS2)), true);
+check(
+	'static config: sessionInstructionsJson carries the rules',
+	($sessionJsonS2['scope']['scope_specification'][0]['path'] ?? null) === '/assets/',
+);
+
+// Per-request override, mirroring allowedRefreshInitiators: null inherits, [] forces the key off.
+$storeS3 = new InMemoryStore();
+$serverS3 = new DbscServer(
+	new Config(cookieName: '__Host-dbsc', scopeSpecification: [ScopeRule::exclude(path: '/assets/')]),
+	$storeS3,
+);
+$devS3 = new FakeDevice();
+$sidS3 = 'session-SCOPE3';
+$regS3Hdr = $serverS3->buildRegistrationHeaderResponse(ctx($sidS3));
+preg_match('/challenge="([^"]+)"/', $regS3Hdr->headers['Secure-Session-Registration'], $ms3);
+$ctxOverride = new RequestContext(
+	$sidS3,
+	'user-1',
+	'https://example.com',
+	[],
+	[],
+	null,
+	[ScopeRule::exclude(path: '/per-request')],
+);
+$regS3 = $serverS3->register($devS3->registrationJwt($ms3[1]), $ctxOverride);
+$regS3Decoded = json_decode($regS3->body, true);
+check(
+	'per-request override replaces the Config rules',
+	($regS3Decoded['scope']['scope_specification'][0]['path'] ?? null) === '/per-request',
+);
+
+$storeS4 = new InMemoryStore();
+$serverS4 = new DbscServer(
+	new Config(cookieName: '__Host-dbsc', scopeSpecification: [ScopeRule::exclude(path: '/assets/')]),
+	$storeS4,
+);
+$devS4 = new FakeDevice();
+$sidS4 = 'session-SCOPE4';
+$regS4Hdr = $serverS4->buildRegistrationHeaderResponse(ctx($sidS4));
+preg_match('/challenge="([^"]+)"/', $regS4Hdr->headers['Secure-Session-Registration'], $ms4);
+$regS4 = $serverS4->register(
+	$devS4->registrationJwt($ms4[1]),
+	new RequestContext($sidS4, 'user-1', 'https://example.com', [], [], null, []),
+);
+check(
+	'an empty per-request array forces the key off rather than inheriting',
+	!str_contains($regS4->body, 'scope_specification'),
+);
+
+// A malformed rule must be impossible to construct, not merely discouraged.
+$rejected = 0;
+try {
+	ScopeRule::exclude();
+} catch (\InvalidArgumentException) {
+	$rejected++;
+}
+check('a rule with neither domain nor path is rejected', $rejected === 1);
 
 echo "\n" . ($failed === 0 ? "OK" : "FAILED") . " — $tests checks, $failed failed\n";
 exit($failed === 0 ? 0 : 1);

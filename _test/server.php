@@ -31,6 +31,7 @@ require __DIR__ . '/../src/PendingRegistration.php';
 require __DIR__ . '/../src/Binding.php';
 require __DIR__ . '/../src/StoreInterface.php';
 require __DIR__ . '/../src/JwtVerifier.php';
+require __DIR__ . '/../src/ScopeRule.php';
 require __DIR__ . '/../src/Config.php';
 require __DIR__ . '/../src/RequestContext.php';
 require __DIR__ . '/../src/Cookie.php';
